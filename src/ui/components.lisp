@@ -28,9 +28,142 @@
 (defvar *task-form-notes* "" "Notes input")
 (defvar *task-form-due-date* "" "Due date input (YYYY-MM-DD)")
 
+;;; Cursor position tracking for text editing
+(defvar *cursor-pos* 0 "Cursor position within current text field")
+(defvar *kill-ring* "" "Killed text for yank operation")
+
 (defparameter *task-form-fields*
   '(:title :notes :due-date :project :priority :status :kind :size)
   "All task form fields")
+
+;;; Text editing helper functions (readline-style)
+
+(defun get-current-text-field ()
+  "Get the current text field value based on *task-form-field*."
+  (case *task-form-field*
+    (0 *task-form-title*)
+    (1 *task-form-notes*)
+    (2 *task-form-due-date*)
+    (otherwise "")))
+
+(defun set-current-text-field (value)
+  "Set the current text field value."
+  (case *task-form-field*
+    (0 (setf *task-form-title* value))
+    (1 (setf *task-form-notes* value))
+    (2 (setf *task-form-due-date* value))))
+
+(defun clamp-cursor ()
+  "Clamp cursor position to valid range."
+  (setf *cursor-pos* (max 0 (min *cursor-pos* (length (get-current-text-field))))))
+
+(defun text-insert-at-cursor (char)
+  "Insert character at cursor position."
+  (let* ((text (get-current-text-field))
+         (before (subseq text 0 *cursor-pos*))
+         (after (subseq text *cursor-pos*)))
+    (set-current-text-field (concatenate 'string before (string char) after))
+    (incf *cursor-pos*)))
+
+(defun text-delete-backward ()
+  "Delete character before cursor (backspace)."
+  (when (> *cursor-pos* 0)
+    (let* ((text (get-current-text-field))
+           (before (subseq text 0 (1- *cursor-pos*)))
+           (after (subseq text *cursor-pos*)))
+      (set-current-text-field (concatenate 'string before after))
+      (decf *cursor-pos*))))
+
+(defun text-delete-forward ()
+  "Delete character at cursor (delete key)."
+  (let ((text (get-current-text-field)))
+    (when (< *cursor-pos* (length text))
+      (let ((before (subseq text 0 *cursor-pos*))
+            (after (subseq text (1+ *cursor-pos*))))
+        (set-current-text-field (concatenate 'string before after))))))
+
+(defun text-kill-to-end ()
+  "Kill text from cursor to end of line (Ctrl-K)."
+  (let ((text (get-current-text-field)))
+    ;; For single-line fields, kill to end
+    ;; For notes (field 1), kill to end of current line
+    (if (= *task-form-field* 1)
+        ;; Find next newline or end
+        (let ((next-nl (position #\Newline text :start *cursor-pos*)))
+          (setf *kill-ring* (subseq text *cursor-pos* (or next-nl (length text))))
+          (set-current-text-field
+           (concatenate 'string
+                        (subseq text 0 *cursor-pos*)
+                        (if next-nl (subseq text next-nl) ""))))
+        ;; Single-line: kill to end
+        (progn
+          (setf *kill-ring* (subseq text *cursor-pos*))
+          (set-current-text-field (subseq text 0 *cursor-pos*))))))
+
+(defun text-kill-to-start ()
+  "Kill text from start to cursor (Ctrl-U)."
+  (let ((text (get-current-text-field)))
+    (setf *kill-ring* (subseq text 0 *cursor-pos*))
+    (set-current-text-field (subseq text *cursor-pos*))
+    (setf *cursor-pos* 0)))
+
+(defun text-kill-word-backward ()
+  "Kill word backward from cursor (Ctrl-W)."
+  (let* ((text (get-current-text-field))
+         (pos *cursor-pos*))
+    ;; Skip spaces backward
+    (loop while (and (> pos 0) (char= (char text (1- pos)) #\Space))
+          do (decf pos))
+    ;; Skip non-spaces backward (the word)
+    (loop while (and (> pos 0) (not (char= (char text (1- pos)) #\Space)))
+          do (decf pos))
+    ;; Kill from pos to cursor
+    (setf *kill-ring* (subseq text pos *cursor-pos*))
+    (set-current-text-field
+     (concatenate 'string (subseq text 0 pos) (subseq text *cursor-pos*)))
+    (setf *cursor-pos* pos)))
+
+(defun text-yank ()
+  "Yank (paste) killed text at cursor (Ctrl-Y)."
+  (when (> (length *kill-ring*) 0)
+    (let* ((text (get-current-text-field))
+           (before (subseq text 0 *cursor-pos*))
+           (after (subseq text *cursor-pos*)))
+      (set-current-text-field (concatenate 'string before *kill-ring* after))
+      (incf *cursor-pos* (length *kill-ring*)))))
+
+(defun text-move-start ()
+  "Move cursor to start (Ctrl-A)."
+  (setf *cursor-pos* 0))
+
+(defun text-move-end ()
+  "Move cursor to end (Ctrl-E)."
+  (setf *cursor-pos* (length (get-current-text-field))))
+
+(defun text-move-forward-word ()
+  "Move cursor forward one word (Alt-F)."
+  (let* ((text (get-current-text-field))
+         (len (length text))
+         (pos *cursor-pos*))
+    ;; Skip current word (non-spaces)
+    (loop while (and (< pos len) (not (char= (char text pos) #\Space)))
+          do (incf pos))
+    ;; Skip spaces
+    (loop while (and (< pos len) (char= (char text pos) #\Space))
+          do (incf pos))
+    (setf *cursor-pos* pos)))
+
+(defun text-move-backward-word ()
+  "Move cursor backward one word (Alt-B)."
+  (let* ((text (get-current-text-field))
+         (pos *cursor-pos*))
+    ;; Skip spaces backward
+    (loop while (and (> pos 0) (char= (char text (1- pos)) #\Space))
+          do (decf pos))
+    ;; Skip word backward
+    (loop while (and (> pos 0) (not (char= (char text (1- pos)) #\Space)))
+          do (decf pos))
+    (setf *cursor-pos* pos)))
 
 ;;; Utility functions
 (defun truncate-string (str max-len)
@@ -273,7 +406,7 @@
       (setf (color-pair win) '(:black :white)))))
 
 (defun draw-detail-edit-field (win row x label value focused is-text-field max-width)
-  "Draw an editable field in the detail pane."
+  "Draw an editable field in the detail pane with cursor support."
   ;; Clear the line first
   (move win row x)
   (setf (color-pair win) '(:black :white))
@@ -287,33 +420,83 @@
   (format win "~A: " label)
   (setf (color-pair win) '(:black :white))
 
-  ;; Calculate available space and truncate value
+  ;; Calculate available space
   (let* ((label-len (+ (length label) 2))
          (bracket-len (if is-text-field 0 4))
-         (available-len (- max-width label-len bracket-len 1))
-         (clean-value (sanitize-for-display value))
-         (display-value (if (> (length clean-value) available-len)
-                            (concatenate 'string
-                                        (subseq clean-value 0 (max 0 (- available-len 3)))
-                                        "...")
-                            clean-value)))
+         (available-len (max 1 (- max-width label-len bracket-len 1)))
+         (clean-value (sanitize-for-display value)))
     (if is-text-field
-        (progn
-          (when focused
-            (setf (attributes win) '(:underline)))
-          (format win "~A" (if (string= display-value "") (if focused "_" "") display-value))
-          (when focused
-            (format win "_"))
-          (setf (attributes win) '()))
+        ;; Text field with cursor
+        (if focused
+            ;; Show cursor at *cursor-pos*
+            (let* ((cursor (min *cursor-pos* (length clean-value)))
+                   (visible-start 0)
+                   (visible-len (- available-len 1))) ; Leave room for cursor
+              ;; Calculate visible window to keep cursor in view
+              (when (> (length clean-value) visible-len)
+                (cond
+                  ;; Cursor near start - show from beginning
+                  ((< cursor visible-len)
+                   (setf visible-start 0))
+                  ;; Otherwise scroll to keep cursor visible
+                  (t
+                   (setf visible-start (- cursor (floor visible-len 2))))))
+              ;; Extract visible portion
+              (let* ((visible-end (min (length clean-value) (+ visible-start visible-len)))
+                     (visible-text (subseq clean-value visible-start visible-end))
+                     (cursor-in-visible (- cursor visible-start)))
+                ;; Ensure cursor position is valid within visible text
+                (setf cursor-in-visible (max 0 (min cursor-in-visible (length visible-text))))
+                ;; Draw text before cursor
+                (setf (attributes win) '(:underline))
+                (when (> cursor-in-visible 0)
+                  (format win "~A" (subseq visible-text 0 cursor-in-visible)))
+                ;; Draw cursor (reverse video)
+                (setf (attributes win) '(:reverse))
+                (if (< cursor-in-visible (length visible-text))
+                    (format win "~C" (char visible-text cursor-in-visible))
+                    (format win " "))
+                ;; Draw text after cursor
+                (setf (attributes win) '(:underline))
+                (when (< (1+ cursor-in-visible) (length visible-text))
+                  (format win "~A" (subseq visible-text (1+ cursor-in-visible))))
+                (setf (attributes win) '())))
+            ;; Not focused - simple display with truncation
+            (let ((display-value (if (> (length clean-value) available-len)
+                                     (concatenate 'string
+                                                 (subseq clean-value 0 (max 0 (- available-len 3)))
+                                                 "...")
+                                     clean-value)))
+              (format win "~A" display-value)))
         ;; Select field
-        (progn
+        (let* ((select-available (max 1 (- available-len 4)))
+               (display-value (if (> (length clean-value) select-available)
+                                  (concatenate 'string
+                                              (subseq clean-value 0 (max 0 (- select-available 3)))
+                                              "...")
+                                  clean-value)))
           (when focused
             (setf (attributes win) '(:bold)))
           (format win "< ~A >" display-value)
           (setf (attributes win) '())))))
 
+(defun cursor-line-and-col (text cursor-pos)
+  "Calculate line number and column from cursor position in text.
+Returns (values line-num col-in-line line-start-pos)."
+  (let ((line 0)
+        (col 0)
+        (line-start 0))
+    (loop for i from 0 below (min cursor-pos (length text))
+          do (if (char= (char text i) #\Newline)
+                 (progn
+                   (incf line)
+                   (setf col 0)
+                   (setf line-start (1+ i)))
+                 (incf col)))
+    (values line col line-start)))
+
 (defun draw-detail-edit-notes (win start-row x max-width max-lines focused notes)
-  "Draw multi-line notes editor. Returns the number of rows used."
+  "Draw multi-line notes editor with cursor support. Returns the number of rows used."
   ;; Draw label
   (move win start-row x)
   (if focused
@@ -321,46 +504,90 @@
       (setf (color-pair win) '(:black :white)))
   (format win "Notes:")
   (when focused
-    (format win " (Enter=newline, Tab=next)"))
+    (let ((hint " (^A/E:home/end ^K:kill)"))
+      (when (< (+ 6 (length hint)) max-width)
+        (format win "~A" hint))))
   (setf (color-pair win) '(:black :white))
 
   ;; Split notes into lines
-  (let* ((all-lines (if (or (null notes) (string= notes ""))
+  (let* ((notes-str (or notes ""))
+         (all-lines (if (string= notes-str "")
                         (list "")
-                        (uiop:split-string notes :separator '(#\Newline))))
-         ;; When focused, show last lines (where we're typing); otherwise show first lines
-         (start-idx (if focused
-                        (max 0 (- (length all-lines) max-lines))
-                        0))
-         (lines (subseq all-lines start-idx (min (length all-lines) (+ start-idx max-lines))))
-         (row (1+ start-row)))
-    ;; Draw each line
-    (loop for line in lines
-          for line-num from 0 below max-lines
-          do (progn
-               (move win row x)
-               ;; Clear the line first
-               (setf (color-pair win) '(:black :white))
-               (format win "~A" (make-string max-width :initial-element #\Space))
-               (move win row x)
-               ;; Draw the text
-               (when focused
-                 (setf (attributes win) '(:underline)))
-               (format win "  ~A" (truncate-string line (- max-width 4)))
-               (setf (attributes win) '())
-               (incf row)))
-    ;; If focused, show cursor on a new line if there's room
-    (when (and focused (< (length lines) max-lines))
-      (move win row x)
-      (setf (color-pair win) '(:black :white))
-      (format win "~A" (make-string max-width :initial-element #\Space))
-      (move win row x)
-      (setf (attributes win) '(:underline))
-      (format win "  _")
-      (setf (attributes win) '())
-      (incf row))
-    ;; Return rows used (label + content lines)
-    (max 2 (1+ (min max-lines (1+ (length lines)))))))
+                        (uiop:split-string notes-str :separator '(#\Newline))))
+         (row (1+ start-row))
+         (content-width (max 1 (- max-width 4)))) ; Account for "  " prefix and margin
+
+    (if focused
+        ;; Focused: show cursor
+        (multiple-value-bind (cursor-line cursor-col line-start)
+            (cursor-line-and-col notes-str *cursor-pos*)
+          (declare (ignore line-start))
+          ;; Calculate visible line range around cursor
+          (let* ((visible-start (max 0 (- cursor-line (floor max-lines 2))))
+                 (visible-end (min (length all-lines) (+ visible-start max-lines))))
+            ;; Adjust if near end
+            (when (> visible-end (length all-lines))
+              (setf visible-end (length all-lines))
+              (setf visible-start (max 0 (- visible-end max-lines))))
+            ;; Draw visible lines
+            (loop for line-idx from visible-start below visible-end
+                  for display-row from 0 below max-lines
+                  do (let* ((line (or (nth line-idx all-lines) ""))
+                            (is-cursor-line (= line-idx cursor-line)))
+                       (move win row x)
+                       (setf (color-pair win) '(:black :white))
+                       (format win "~A" (make-string max-width :initial-element #\Space))
+                       (move win row x)
+                       (format win "  ")
+                       ;; Draw line with cursor if this is the cursor line
+                       (if is-cursor-line
+                           (let* ((safe-col (min cursor-col (length line)))
+                                  ;; Calculate horizontal scroll for long lines
+                                  (h-scroll 0)
+                                  (visible-len (- content-width 1))) ; Leave room for cursor
+                             ;; Scroll horizontally if cursor is past visible area
+                             (when (> safe-col visible-len)
+                               (setf h-scroll (- safe-col (floor visible-len 2))))
+                             ;; Extract visible portion of line
+                             (let* ((vis-start h-scroll)
+                                    (vis-end (min (length line) (+ h-scroll content-width)))
+                                    (cursor-in-vis (- safe-col h-scroll)))
+                               (setf (attributes win) '(:underline))
+                               ;; Text before cursor
+                               (when (> cursor-in-vis 0)
+                                 (format win "~A" (subseq line vis-start (+ vis-start cursor-in-vis))))
+                               ;; Cursor
+                               (setf (attributes win) '(:reverse))
+                               (if (< safe-col (length line))
+                                   (format win "~C" (char line safe-col))
+                                   (format win " "))
+                               ;; Text after cursor
+                               (setf (attributes win) '(:underline))
+                               (let ((after-start (min (1+ safe-col) (length line))))
+                                 (when (< after-start vis-end)
+                                   (format win "~A" (subseq line after-start vis-end))))
+                               (setf (attributes win) '())))
+                           ;; Non-cursor line - just truncate
+                           (progn
+                             (setf (attributes win) '(:underline))
+                             (format win "~A" (truncate-string line content-width))
+                             (setf (attributes win) '())))
+                       (incf row)))))
+        ;; Not focused: simple display
+        (let* ((start-idx 0)
+               (lines (subseq all-lines start-idx (min (length all-lines) (+ start-idx max-lines)))))
+          (loop for line in lines
+                for line-num from 0 below max-lines
+                do (progn
+                     (move win row x)
+                     (setf (color-pair win) '(:black :white))
+                     (format win "~A" (make-string max-width :initial-element #\Space))
+                     (move win row x)
+                     (format win "  ~A" (truncate-string (or line "") content-width))
+                     (incf row)))))
+
+    ;; Return rows used
+    (max 2 (1+ (min max-lines (length all-lines))))))
 
 (defun draw-task-detail-edit (win x y width height task)
   "Draw task details in edit mode with editable fields."
@@ -473,13 +700,16 @@
   (format win "~A" (make-string width :initial-element #\Space))
   (move win y 0)
 
-  ;; Keys - show different hints based on focus
+  ;; Keys - show different hints based on focus and field type
   (let ((keys (cond
-                ;; Detail pane - notes field has different hint
-                ((and (eq *focus* :detail) (= *task-form-field* 1))
-                 "Enter:Newline  Tab:Next Field  Esc:Cancel")
+                ;; Detail pane - text fields show readline hints
+                ((and (eq *focus* :detail) (<= *task-form-field* 2))
+                 (if (= *task-form-field* 1)
+                     "^A/E:Home/End ^K:Kill ^Y:Paste Enter:Newline Tab:Next Esc:Cancel"
+                     "^A/E:Home/End ^K:Kill ^Y:Paste Enter:Save Tab:Next Esc:Cancel"))
+                ;; Detail pane - select fields
                 ((eq *focus* :detail)
-                 "Tab:Next Field  Enter:Save  Esc:Cancel")
+                 "Space/Arrows:Cycle Tab:Next Enter:Save Esc:Cancel")
                 ((eq *focus* :sidebar)
                  "j/k:Nav  Enter:Select  Tab:List  ?:Help  q:Quit")
                 (t ; :list focus
@@ -543,11 +773,13 @@
 
 ;;; Component: Input Dialog
 (defun draw-input-dialog (win width height prompt current-value)
-  "Draw input dialog."
+  "Draw input dialog with cursor support."
   (let* ((dialog-width 60)
          (dialog-height 5)
          (start-x (max 0 (floor (- width dialog-width) 2)))
-         (start-y (max 0 (floor (- height dialog-height) 2))))
+         (start-y (max 0 (floor (- height dialog-height) 2)))
+         (field-width (- dialog-width 4))
+         (cursor (min *input-cursor* (length current-value))))
     ;; Draw border
     (loop for r from 0 below dialog-height do
           (move win (+ start-y r) start-x)
@@ -564,14 +796,40 @@
     ;; Prompt
     (move win (+ start-y 1) (+ start-x 2))
     (setf (attributes win) '(:bold))
-    (format win "~A" prompt)
+    (format win "~A" (truncate-string prompt (- field-width 2)))
     (setf (attributes win) '())
-    ;; Input field
+    ;; Input field with cursor - properly constrained
     (move win (+ start-y 2) (+ start-x 2))
-    (format win "~A" current-value)
-    (setf (attributes win) '(:blink))
-    (format win "_")
-    (setf (attributes win) '())))
+    (let* ((visible-len (- field-width 1)) ; Leave room for cursor
+           (visible-start 0))
+      ;; Calculate horizontal scroll
+      (when (> (length current-value) visible-len)
+        (cond
+          ((< cursor visible-len)
+           (setf visible-start 0))
+          (t
+           (setf visible-start (- cursor (floor visible-len 2))))))
+      ;; Extract visible portion
+      (let* ((visible-end (min (length current-value) (+ visible-start visible-len)))
+             (cursor-in-vis (- cursor visible-start)))
+        (setf cursor-in-vis (max 0 (min cursor-in-vis visible-len)))
+        ;; Draw text before cursor
+        (setf (attributes win) '(:underline))
+        (when (> cursor-in-vis 0)
+          (format win "~A" (subseq current-value visible-start (+ visible-start cursor-in-vis))))
+        ;; Draw cursor
+        (setf (attributes win) '(:reverse))
+        (if (< cursor (length current-value))
+            (format win "~C" (char current-value cursor))
+            (format win " "))
+        ;; Draw text after cursor
+        (setf (attributes win) '(:underline))
+        (let* ((after-start (1+ cursor))
+               (remaining (- visible-len cursor-in-vis 1)))
+          (when (and (< after-start (length current-value)) (> remaining 0))
+            (format win "~A" (subseq current-value after-start
+                                     (min (length current-value) (+ after-start remaining))))))
+        (setf (attributes win) '())))))
 
 ;;; Component: Task Form
 (defun sanitize-for-display (str)
@@ -582,7 +840,7 @@
                   (substitute #\Space #\Return str))))
 
 (defun draw-task-form-field (win row x label value focused is-text-field max-value-len)
-  "Draw a single form field at the given row."
+  "Draw a single form field at the given row with cursor support."
   ;; Sanitize value - remove newlines for single-line display
   (let ((clean-value (sanitize-for-display value)))
     ;; First clear the entire field area
@@ -601,24 +859,63 @@
     ;; Calculate available length for value (account for brackets in select fields)
     (let* ((label-len (+ (length label) 2)) ; "Label: "
            (bracket-len (if is-text-field 0 4)) ; "< " and " >"
-           (available-len (- max-value-len label-len bracket-len 1))
-           (display-value (if (> (length clean-value) available-len)
-                              (concatenate 'string
-                                          (subseq clean-value 0 (max 0 (- available-len 3)))
-                                          "...")
-                              clean-value)))
-    (if is-text-field
-        (progn
-          (when focused
-            (setf (attributes win) '(:underline)))
-          (format win "~A" (if (string= display-value "") (if focused "_" "") display-value))
-          (setf (attributes win) '()))
-        ;; Select field
-        (progn
-          (when focused
-            (setf (attributes win) '(:bold)))
-          (format win "< ~A >" display-value)
-          (setf (attributes win) '()))))))
+           (available-len (max 1 (- max-value-len label-len bracket-len 1))))
+
+      (if is-text-field
+          (if focused
+              ;; Show cursor at *cursor-pos* with proper width constraint
+              (let* ((cursor (min *cursor-pos* (length clean-value)))
+                     (visible-len (- available-len 1)) ; Leave room for cursor
+                     (visible-start 0))
+                ;; Calculate horizontal scroll to keep cursor visible
+                (when (> (length clean-value) visible-len)
+                  (cond
+                    ;; Cursor near start
+                    ((< cursor visible-len)
+                     (setf visible-start 0))
+                    ;; Scroll to keep cursor centered
+                    (t
+                     (setf visible-start (- cursor (floor visible-len 2))))))
+                ;; Extract visible portion
+                (let* ((visible-end (min (length clean-value) (+ visible-start visible-len)))
+                       (cursor-in-vis (- cursor visible-start)))
+                  (setf cursor-in-vis (max 0 (min cursor-in-vis visible-len)))
+                  ;; Draw text before cursor
+                  (setf (attributes win) '(:underline))
+                  (when (> cursor-in-vis 0)
+                    (let ((before-end (min (+ visible-start cursor-in-vis) (length clean-value))))
+                      (format win "~A" (subseq clean-value visible-start before-end))))
+                  ;; Draw cursor
+                  (setf (attributes win) '(:reverse))
+                  (if (< cursor (length clean-value))
+                      (format win "~C" (char clean-value cursor))
+                      (format win " "))
+                  ;; Draw text after cursor (limited to available space)
+                  (setf (attributes win) '(:underline))
+                  (let* ((after-start (1+ cursor))
+                         (remaining-space (- visible-len cursor-in-vis 1)))
+                    (when (and (< after-start (length clean-value)) (> remaining-space 0))
+                      (let ((after-end (min (length clean-value) (+ after-start remaining-space))))
+                        (format win "~A" (subseq clean-value after-start after-end)))))
+                  (setf (attributes win) '())))
+              ;; Not focused - simple display with truncation
+              (let ((display-value (if (> (length clean-value) available-len)
+                                       (concatenate 'string
+                                                   (subseq clean-value 0 (max 0 (- available-len 3)))
+                                                   "...")
+                                       clean-value)))
+                (format win "~A" display-value)))
+          ;; Select field
+          (let* ((select-avail (max 1 (- available-len 4)))
+                 (display-value (if (> (length clean-value) select-avail)
+                                    (concatenate 'string
+                                                (subseq clean-value 0 (max 0 (- select-avail 3)))
+                                                "...")
+                                    clean-value)))
+            (when focused
+              (setf (attributes win) '(:bold)))
+            (format win "< ~A >" display-value)
+            (setf (attributes win) '()))))))
 
 (defun get-project-name-by-id (project-id)
   "Get project name by ID."

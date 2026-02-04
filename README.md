@@ -17,6 +17,7 @@ Ported by Claude Code.
   - Distinct task kinds: `[ISS]` issues, `[PR]` your PRs, `[REV]` review requests
 - Inline task editing in detail pane
 - Multi-line notes editing
+- **Readline-style text editing** with Emacs keybindings (Ctrl-A/E, Ctrl-K, Ctrl-Y, etc.)
 - Vim-like keyboard navigation
 - Open task URLs directly in browser
 - Configurable settings
@@ -87,6 +88,21 @@ sbcl --load ~/quicklisp/setup.lisp \
 | `Enter` | Save changes (or newline in Notes field) |
 | `Escape` | Cancel editing |
 | `Space` | Cycle value (for select fields) |
+| `Left/Right` | Move cursor (in text fields) |
+
+### Text Editing (Readline-style)
+| Key | Action |
+|-----|--------|
+| `Ctrl-A` | Move to beginning of line |
+| `Ctrl-E` | Move to end of line |
+| `Ctrl-B` | Move backward one character |
+| `Ctrl-F` | Move forward one character |
+| `Ctrl-K` | Kill text to end of line |
+| `Ctrl-U` | Kill text to beginning of line |
+| `Ctrl-W` | Kill word backward |
+| `Ctrl-Y` | Yank (paste) killed text |
+| `Delete` | Delete character forward |
+| `Backspace` | Delete character backward |
 
 ### Other
 | Key | Action |

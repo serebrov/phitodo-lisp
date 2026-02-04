@@ -136,7 +136,9 @@
                 ""))
       ;; Store reference to the task being edited
       (setf *task-form-task* task)
-      (setf *task-form-is-new* nil))))
+      (setf *task-form-is-new* nil)
+      ;; Initialize cursor at end of title field
+      (setf *cursor-pos* (length *task-form-title*)))))
 
 (defun save-detail-edit ()
   "Save changes from detail pane editing."
@@ -221,6 +223,7 @@
   (setf *input-mode* t)
   (setf *input-prompt* prompt)
   (setf *input-buffer* (or initial-value ""))
+  (setf *input-cursor* (length *input-buffer*))
   (setf *input-callback* callback))
 
 (defun finish-input ()
@@ -253,7 +256,8 @@
   (setf *task-form-field* 0)
   (setf *task-form-title* "")
   (setf *task-form-notes* "")
-  (setf *task-form-due-date* ""))
+  (setf *task-form-due-date* "")
+  (setf *cursor-pos* 0))
 
 (defun start-edit-task ()
   "Start editing the selected task in the detail pane."
@@ -385,24 +389,69 @@
                  (nth *settings-selected* current-values))))
 
 ;;; Key event handling
+(defvar *input-cursor* 0 "Cursor position in input buffer")
+
 (defun handle-input-key (event)
-  "Handle key in input mode."
+  "Handle key in input mode with readline support."
   (cond
-    ((eql event #\Newline)
+    ((or (eql event #\Newline) (eql event #\Return))
      (finish-input))
-    ((eql event #\Return)
-     (finish-input))
-    ((or (eql event :escape)
-         (eql event #\Escape))
+    ((or (eql event :escape) (eql event #\Escape))
      (cancel-input))
-    ((or (eql event #\Backspace)
-         (eql event #\Rubout)
-         (eql event :backspace))
-     (when (> (length *input-buffer*) 0)
-       (setf *input-buffer* (subseq *input-buffer* 0 (1- (length *input-buffer*))))))
-    ((characterp event)
-     (when (graphic-char-p event)
-       (setf *input-buffer* (concatenate 'string *input-buffer* (string event)))))))
+    ;; Backspace
+    ((or (eql event #\Backspace) (eql event #\Rubout) (eql event :backspace))
+     (when (> *input-cursor* 0)
+       (setf *input-buffer*
+             (concatenate 'string
+                         (subseq *input-buffer* 0 (1- *input-cursor*))
+                         (subseq *input-buffer* *input-cursor*)))
+       (decf *input-cursor*)))
+    ;; Delete
+    ((or (eql event :dc) (eql event :delete))
+     (when (< *input-cursor* (length *input-buffer*))
+       (setf *input-buffer*
+             (concatenate 'string
+                         (subseq *input-buffer* 0 *input-cursor*)
+                         (subseq *input-buffer* (1+ *input-cursor*))))))
+    ;; Ctrl-A - home
+    ((eql event #\Soh)
+     (setf *input-cursor* 0))
+    ;; Ctrl-E - end
+    ((eql event #\Enq)
+     (setf *input-cursor* (length *input-buffer*)))
+    ;; Ctrl-B or Left - back
+    ((or (eql event #\Stx) (eql event :left) (eql event :key-left))
+     (when (> *input-cursor* 0)
+       (decf *input-cursor*)))
+    ;; Ctrl-F or Right - forward
+    ((or (eql event #\Ack) (eql event :right) (eql event :key-right))
+     (when (< *input-cursor* (length *input-buffer*))
+       (incf *input-cursor*)))
+    ;; Ctrl-K - kill to end
+    ((eql event #\Vt)
+     (setf *kill-ring* (subseq *input-buffer* *input-cursor*))
+     (setf *input-buffer* (subseq *input-buffer* 0 *input-cursor*)))
+    ;; Ctrl-U - kill to start
+    ((eql event #\Nak)
+     (setf *kill-ring* (subseq *input-buffer* 0 *input-cursor*))
+     (setf *input-buffer* (subseq *input-buffer* *input-cursor*))
+     (setf *input-cursor* 0))
+    ;; Ctrl-Y - yank
+    ((eql event #\Em)
+     (setf *input-buffer*
+           (concatenate 'string
+                       (subseq *input-buffer* 0 *input-cursor*)
+                       *kill-ring*
+                       (subseq *input-buffer* *input-cursor*)))
+     (incf *input-cursor* (length *kill-ring*)))
+    ;; Character input
+    ((and (characterp event) (graphic-char-p event))
+     (setf *input-buffer*
+           (concatenate 'string
+                       (subseq *input-buffer* 0 *input-cursor*)
+                       (string event)
+                       (subseq *input-buffer* *input-cursor*)))
+     (incf *input-cursor*))))
 
 (defun handle-normal-key (event)
   "Handle key in normal mode."
@@ -511,60 +560,138 @@
       (slot-value key 'name)
       key))
 
+(defun task-form-switch-field (delta)
+  "Switch field in task form and update cursor."
+  (let ((old-field *task-form-field*))
+    (if (> delta 0)
+        (task-form-next-field)
+        (task-form-prev-field))
+    (when (/= old-field *task-form-field*)
+      (setf *cursor-pos* (length (get-current-text-field))))))
+
 (defun handle-task-form-key (key)
-  "Handle key in task form mode."
+  "Handle key in task form mode with readline-style editing."
   (cond
     ;; Escape - cancel
     ((or (eql key #\Escape) (eql key :escape))
      (cancel-task-form))
-    ;; Enter - save
+    ;; Enter - save (no newlines in popup form)
     ((or (eql key #\Return) (eql key #\Newline) (eql key :enter))
      (save-task-form))
     ;; Tab - next field
     ((eql key #\Tab)
-     (task-form-next-field))
-    ;; Shift+Tab or backtab - previous field (simplified: use k)
+     (task-form-switch-field 1))
+    ;; Shift+Tab or backtab - previous field
     ((or (eql key :btab) (eql key :backtab))
-     (task-form-prev-field))
+     (task-form-switch-field -1))
+
+    ;; For text fields (0, 1, 2) - readline-style editing
+    ;; Backspace - delete backward
+    ((or (eql key #\Backspace) (eql key #\Rubout) (eql key :backspace))
+     (when (<= *task-form-field* 2)
+       (text-delete-backward)))
+
+    ;; Delete - delete forward
+    ((or (eql key :dc) (eql key :delete))
+     (when (<= *task-form-field* 2)
+       (text-delete-forward)))
+
+    ;; Ctrl-A - beginning
+    ((eql key #\Soh)
+     (when (<= *task-form-field* 2)
+       (text-move-start)))
+
+    ;; Ctrl-E - end
+    ((eql key #\Enq)
+     (when (<= *task-form-field* 2)
+       (text-move-end)))
+
+    ;; Ctrl-B - backward char
+    ((eql key #\Stx)
+     (when (<= *task-form-field* 2)
+       (when (> *cursor-pos* 0)
+         (decf *cursor-pos*))))
+
+    ;; Ctrl-F - forward char
+    ((eql key #\Ack)
+     (when (<= *task-form-field* 2)
+       (when (< *cursor-pos* (length (get-current-text-field)))
+         (incf *cursor-pos*))))
+
+    ;; Ctrl-K - kill to end
+    ((eql key #\Vt)
+     (when (<= *task-form-field* 2)
+       (text-kill-to-end)))
+
+    ;; Ctrl-U - kill to start
+    ((eql key #\Nak)
+     (when (<= *task-form-field* 2)
+       (text-kill-to-start)))
+
+    ;; Ctrl-W - kill word backward
+    ((eql key #\Etb)
+     (when (<= *task-form-field* 2)
+       (text-kill-word-backward)))
+
+    ;; Ctrl-Y - yank
+    ((eql key #\Em)
+     (when (<= *task-form-field* 2)
+       (text-yank)))
+
+    ;; Left arrow - move cursor or cycle select field
+    ((or (eql key :left) (eql key :key-left))
+     (if (<= *task-form-field* 2)
+         (when (> *cursor-pos* 0)
+           (decf *cursor-pos*))
+         (task-form-cycle-value)))
+
+    ;; Right arrow - move cursor or cycle select field
+    ((or (eql key :right) (eql key :key-right))
+     (if (<= *task-form-field* 2)
+         (when (< *cursor-pos* (length (get-current-text-field)))
+           (incf *cursor-pos*))
+         (task-form-cycle-value)))
+
     ;; j/down - next field
     ((or (eql key #\j) (eql key :down) (eql key :key-down))
-     (task-form-next-field))
+     (task-form-switch-field 1))
+
     ;; k/up - previous field
     ((or (eql key #\k) (eql key :up) (eql key :key-up))
-     (task-form-prev-field))
-    ;; Space - cycle value for select fields
+     (task-form-switch-field -1))
+
+    ;; Space - insert space in text fields, cycle in select fields
     ((eql key #\Space)
      (if (<= *task-form-field* 2)
-         ;; Text field - add space
-         (case *task-form-field*
-           (0 (setf *task-form-title* (concatenate 'string *task-form-title* " ")))
-           (1 (setf *task-form-notes* (concatenate 'string *task-form-notes* " ")))
-           (2 nil)) ; No space in date
-         ;; Select field - cycle
+         (unless (= *task-form-field* 2) ; No space in date field
+           (text-insert-at-cursor #\Space))
          (task-form-cycle-value)))
-    ;; Left/Right - cycle value for select fields
-    ((or (eql key #\l) (eql key :right) (eql key :key-right)
-         (eql key #\h) (eql key :left) (eql key :key-left))
+
+    ;; h/l - cycle value for select fields only
+    ((or (eql key #\h) (eql key #\l))
      (when (> *task-form-field* 2)
        (task-form-cycle-value)))
-    ;; Backspace
-    ((or (eql key #\Backspace) (eql key #\Rubout) (eql key :backspace))
-     (case *task-form-field*
-       (0 (when (> (length *task-form-title*) 0)
-            (setf *task-form-title* (subseq *task-form-title* 0 (1- (length *task-form-title*))))))
-       (1 (when (> (length *task-form-notes*) 0)
-            (setf *task-form-notes* (subseq *task-form-notes* 0 (1- (length *task-form-notes*))))))
-       (2 (when (> (length *task-form-due-date*) 0)
-            (setf *task-form-due-date* (subseq *task-form-due-date* 0 (1- (length *task-form-due-date*))))))))
+
     ;; Character input for text fields
     ((and (characterp key) (graphic-char-p key) (<= *task-form-field* 2))
-     (case *task-form-field*
-       (0 (setf *task-form-title* (concatenate 'string *task-form-title* (string key))))
-       (1 (setf *task-form-notes* (concatenate 'string *task-form-notes* (string key))))
-       (2 (setf *task-form-due-date* (concatenate 'string *task-form-due-date* (string key))))))))
+     (text-insert-at-cursor key))))
+
+(defun switch-text-field (delta)
+  "Switch to a different text field and update cursor position."
+  (let ((old-field *task-form-field*))
+    (move-selection delta)
+    ;; Update cursor position for new field
+    (when (/= old-field *task-form-field*)
+      (setf *cursor-pos* (length (get-current-text-field))))))
 
 (defun handle-detail-key (key)
-  "Handle key when detail pane is focused for editing."
+  "Handle key when detail pane is focused for editing.
+Supports readline-style keybindings for text editing:
+  Ctrl-A: Beginning of line    Ctrl-E: End of line
+  Ctrl-K: Kill to end          Ctrl-U: Kill to start
+  Ctrl-W: Kill word backward   Ctrl-Y: Yank
+  Ctrl-B/Left: Back char       Ctrl-F/Right: Forward char
+  Alt-B: Back word             Alt-F: Forward word"
   (cond
     ;; Escape - cancel and return to list (always active)
     ((or (eql key #\Escape) (eql key :escape))
@@ -572,32 +699,97 @@
 
     ;; Tab - next field (always active)
     ((eql key #\Tab)
-     (move-selection 1))
+     (switch-text-field 1))
+
+    ;; --- Text fields (0, 1, 2) with readline support ---
 
     ;; Enter - on notes field (1) inserts newline, otherwise saves
     ((or (eql key #\Return) (eql key #\Newline) (eql key :enter))
      (if (= *task-form-field* 1)
-         (setf *task-form-notes* (concatenate 'string *task-form-notes* (string #\Newline)))
+         (text-insert-at-cursor #\Newline)
          (save-detail-edit)))
 
-    ;; Backspace - delete char on text fields (0, 1, 2)
+    ;; Backspace - delete char backward
     ((or (eql key #\Backspace) (eql key #\Rubout) (eql key :backspace))
-     (case *task-form-field*
-       (0 (when (> (length *task-form-title*) 0)
-            (setf *task-form-title* (subseq *task-form-title* 0 (1- (length *task-form-title*))))))
-       (1 (when (> (length *task-form-notes*) 0)
-            (setf *task-form-notes* (subseq *task-form-notes* 0 (1- (length *task-form-notes*))))))
-       (2 (when (> (length *task-form-due-date*) 0)
-            (setf *task-form-due-date* (subseq *task-form-due-date* 0 (1- (length *task-form-due-date*))))))))
+     (when (<= *task-form-field* 2)
+       (text-delete-backward)))
 
-    ;; Text fields (0, 1, 2): all printable characters as input
+    ;; Delete key - delete char forward
+    ((or (eql key :dc) (eql key :delete))
+     (when (<= *task-form-field* 2)
+       (text-delete-forward)))
+
+    ;; Ctrl-A - beginning of line
+    ((eql key #\Soh)  ; Ctrl-A = ASCII 1
+     (when (<= *task-form-field* 2)
+       (text-move-start)))
+
+    ;; Ctrl-E - end of line
+    ((eql key #\Enq)  ; Ctrl-E = ASCII 5
+     (when (<= *task-form-field* 2)
+       (text-move-end)))
+
+    ;; Ctrl-B - backward char
+    ((eql key #\Stx)  ; Ctrl-B = ASCII 2
+     (when (<= *task-form-field* 2)
+       (when (> *cursor-pos* 0)
+         (decf *cursor-pos*))))
+
+    ;; Ctrl-F - forward char
+    ((eql key #\Ack)  ; Ctrl-F = ASCII 6
+     (when (<= *task-form-field* 2)
+       (when (< *cursor-pos* (length (get-current-text-field)))
+         (incf *cursor-pos*))))
+
+    ;; Ctrl-K - kill to end of line
+    ((eql key #\Vt)   ; Ctrl-K = ASCII 11
+     (when (<= *task-form-field* 2)
+       (text-kill-to-end)))
+
+    ;; Ctrl-U - kill to start of line
+    ((eql key #\Nak)  ; Ctrl-U = ASCII 21
+     (when (<= *task-form-field* 2)
+       (text-kill-to-start)))
+
+    ;; Ctrl-W - kill word backward
+    ((eql key #\Etb)  ; Ctrl-W = ASCII 23
+     (when (<= *task-form-field* 2)
+       (text-kill-word-backward)))
+
+    ;; Ctrl-Y - yank
+    ((eql key #\Em)   ; Ctrl-Y = ASCII 25
+     (when (<= *task-form-field* 2)
+       (text-yank)))
+
+    ;; Left arrow - move cursor left in text fields
+    ((or (eql key :left) (eql key :key-left))
+     (if (<= *task-form-field* 2)
+         (when (> *cursor-pos* 0)
+           (decf *cursor-pos*))
+         (task-form-cycle-value)))
+
+    ;; Right arrow - move cursor right in text fields
+    ((or (eql key :right) (eql key :key-right))
+     (if (<= *task-form-field* 2)
+         (when (< *cursor-pos* (length (get-current-text-field)))
+           (incf *cursor-pos*))
+         (task-form-cycle-value)))
+
+    ;; Home - beginning of line
+    ((or (eql key :home) (eql key :key-home))
+     (when (<= *task-form-field* 2)
+       (text-move-start)))
+
+    ;; End - end of line
+    ((or (eql key :end) (eql key :key-end))
+     (when (<= *task-form-field* 2)
+       (text-move-end)))
+
+    ;; Text fields (0, 1, 2): printable characters as input
     ((and (<= *task-form-field* 2)
           (characterp key)
           (graphic-char-p key))
-     (case *task-form-field*
-       (0 (setf *task-form-title* (concatenate 'string *task-form-title* (string key))))
-       (1 (setf *task-form-notes* (concatenate 'string (or *task-form-notes* "") (string key))))
-       (2 (setf *task-form-due-date* (concatenate 'string *task-form-due-date* (string key))))))
+     (text-insert-at-cursor key))
 
     ;; Select fields (3-7): navigation and cycling
     ((> *task-form-field* 2)
@@ -608,11 +800,8 @@
        ;; k/up - previous field
        ((or (eql key #\k) (eql key :up) (eql key :key-up))
         (move-selection -1))
-       ;; Space/h/l - cycle value
-       ((or (eql key #\Space)
-            (eql key #\h) (eql key #\l)
-            (eql key :left) (eql key :right)
-            (eql key :key-left) (eql key :key-right))
+       ;; Space - cycle value
+       ((eql key #\Space)
         (task-form-cycle-value))))))
 
 (defun handle-event (event)
