@@ -13,6 +13,11 @@
 ;;; Layout constants
 (defparameter *sidebar-width* 20)
 
+;;; View helpers
+(defun task-view-p (view)
+  "Check if view is a task list view that should show detail panel."
+  (member view '(:inbox :today :upcoming :anytime :completed :review)))
+
 ;;; Initialize application
 (defun init-app ()
   "Initialize application state."
@@ -47,12 +52,22 @@
 (defun move-selection (delta)
   "Move selection by delta."
   (cond
-    ;; Move in sidebar
+    ;; Move in sidebar - also switch view immediately
     ((eq *focus* :sidebar)
      (let ((num-items (length *sidebar-items*)))
        (setf *sidebar-index*
              (max 0 (min (1- num-items)
-                         (+ *sidebar-index* delta))))))
+                         (+ *sidebar-index* delta))))
+       ;; Activate the selected view
+       (let ((item (nth *sidebar-index* *sidebar-items*)))
+         (setf *current-view* item)
+         (setf *selected-index* 0))))
+    ;; Move in detail pane (navigate fields)
+    ((eq *focus* :detail)
+     (let ((num-fields 8)) ; title, notes, due-date, project, priority, status, kind, size
+       (setf *task-form-field*
+             (max 0 (min (1- num-fields)
+                         (+ *task-form-field* delta))))))
     ;; Move in settings view
     ((eq *current-view* :settings)
      (let ((num-fields 3)) ; db-path, github-token, toggl-token
@@ -77,9 +92,83 @@
     (when tasks
       (setf *selected-index* (1- (length tasks))))))
 
+(defun focus-left ()
+  "Move focus to the left panel."
+  (setf *focus*
+        (case *focus*
+          (:detail :list)
+          (:list :sidebar)
+          (:sidebar :sidebar)  ; Already at leftmost
+          (otherwise :sidebar))))
+
+(defun focus-right ()
+  "Move focus to the right panel."
+  (let ((new-focus
+          (case *focus*
+            (:sidebar :list)
+            (:list (if (and (task-view-p *current-view*) (get-selected-task))
+                       :detail
+                       :list))  ; Stay on list if no detail available
+            (:detail :detail)  ; Already at rightmost
+            (otherwise :list))))
+    (setf *focus* new-focus)
+    ;; Initialize detail editing state when entering detail
+    (when (eq new-focus :detail)
+      (init-detail-edit))))
+
 (defun toggle-focus ()
-  "Toggle focus between sidebar and list."
-  (setf *focus* (if (eq *focus* :sidebar) :list :sidebar)))
+  "Cycle focus forward (for Tab key)."
+  (focus-right))
+
+(defun init-detail-edit ()
+  "Initialize detail pane for editing the selected task."
+  (let ((task (get-selected-task)))
+    (when task
+      (setf *task-form-field* 0)
+      (setf *task-form-title* (or (phitodo-tui.models:task-title task) ""))
+      (setf *task-form-notes* (or (phitodo-tui.models:task-notes task) ""))
+      (setf *task-form-due-date*
+            (if (phitodo-tui.models:task-due-date task)
+                (local-time:format-timestring
+                 nil (phitodo-tui.models:task-due-date task)
+                 :format '(:year #\- (:month 2) #\- (:day 2))
+                 :timezone local-time:+utc-zone+)
+                ""))
+      ;; Store reference to the task being edited
+      (setf *task-form-task* task)
+      (setf *task-form-is-new* nil))))
+
+(defun save-detail-edit ()
+  "Save changes from detail pane editing."
+  (let ((task *task-form-task*))
+    (when task
+      ;; Apply text inputs
+      (setf (phitodo-tui.models:task-title task) *task-form-title*)
+      (setf (phitodo-tui.models:task-notes task)
+            (if (string= *task-form-notes* "") nil *task-form-notes*))
+      (setf (phitodo-tui.models:task-due-date task)
+            (when (and *task-form-due-date* (not (string= *task-form-due-date* "")))
+              (handler-case
+                  (let ((parts (uiop:split-string *task-form-due-date* :separator '(#\-))))
+                    (when (= (length parts) 3)
+                      (local-time:encode-timestamp
+                       0 0 0 0  ; nsec sec min hour
+                       (parse-integer (third parts))   ; day
+                       (parse-integer (second parts))  ; month
+                       (parse-integer (first parts))   ; year
+                       :timezone local-time:+utc-zone+)))
+                (error () nil))))
+      ;; Save to database
+      (phitodo-tui.db:update-task task)
+      (reload-data)
+      (setf *status-message* "Task saved")
+      ;; Return focus to list
+      (setf *focus* :list))))
+
+(defun cancel-detail-edit ()
+  "Cancel detail editing and return to list."
+  (setf *focus* :list)
+  (setf *status-message* "Edit cancelled"))
 
 ;;; Task actions
 (defun toggle-task-complete ()
@@ -113,7 +202,8 @@
     (when (and task (phitodo-tui.models:task-context-url task))
       #+sbcl (sb-ext:run-program "open"
                                   (list (phitodo-tui.models:task-context-url task))
-                                  :wait nil)
+                                  :wait nil
+                                  :search t)
       (setf *status-message* "Opening URL..."))))
 
 (defun set-task-priority (priority)
@@ -166,22 +256,13 @@
   (setf *task-form-due-date* ""))
 
 (defun start-edit-task ()
-  "Start editing the selected task with full form."
+  "Start editing the selected task in the detail pane."
   (let ((task (get-selected-task)))
     (if task
         (progn
-          (setf *task-form-mode* t)
-          (setf *task-form-is-new* nil)
-          (setf *task-form-task* task)
-          (setf *task-form-field* 0)
-          (setf *task-form-title* (or (phitodo-tui.models:task-title task) ""))
-          (setf *task-form-notes* (or (phitodo-tui.models:task-notes task) ""))
-          (setf *task-form-due-date*
-                (if (phitodo-tui.models:task-due-date task)
-                    (local-time:format-timestring
-                     nil (phitodo-tui.models:task-due-date task)
-                     :format '(:year #\- (:month 2) #\- (:day 2)))
-                    "")))
+          ;; Switch focus to detail pane for inline editing
+          (setf *focus* :detail)
+          (init-detail-edit))
         (setf *status-message* "No task selected"))))
 
 (defun save-task-form ()
@@ -194,7 +275,14 @@
     (setf (phitodo-tui.models:task-due-date task)
           (when (and *task-form-due-date* (not (string= *task-form-due-date* "")))
             (handler-case
-                (local-time:parse-timestring *task-form-due-date* :date-separator #\-)
+                (let ((parts (uiop:split-string *task-form-due-date* :separator '(#\-))))
+                  (when (= (length parts) 3)
+                    (local-time:encode-timestamp
+                     0 0 0 0  ; nsec sec min hour
+                     (parse-integer (third parts))   ; day
+                     (parse-integer (second parts))  ; month
+                     (parse-integer (first parts))   ; year
+                     :timezone local-time:+utc-zone+)))
               (error () nil))))
     ;; Save to database
     (if *task-form-is-new*
@@ -351,9 +439,14 @@
      (move-to-start))
     ((eql event #\G)
      (move-to-end))
-    ((or (eql event #\Tab) (eql event #\h) (eql event #\l)
-         (eql event :left) (eql event :right)
-         (eql event :key-left) (eql event :key-right))
+    ;; Left focus movement
+    ((or (eql event #\h) (eql event :left) (eql event :key-left))
+     (focus-left))
+    ;; Right focus movement
+    ((or (eql event #\l) (eql event :right) (eql event :key-right))
+     (focus-right))
+    ;; Tab cycles forward
+    ((eql event #\Tab)
      (toggle-focus))
 
     ;; Enter to activate
@@ -366,9 +459,9 @@
        ;; Settings: edit selected field
        ((eq *current-view* :settings)
         (start-edit-setting))
-       ;; Task list: placeholder
+       ;; Task list: edit the selected task
        (t
-        (setf *status-message* "Task detail view not implemented"))))
+        (start-edit-task))))
 
     ;; Task actions
     ((eql event #\Space)
@@ -470,6 +563,58 @@
        (1 (setf *task-form-notes* (concatenate 'string *task-form-notes* (string key))))
        (2 (setf *task-form-due-date* (concatenate 'string *task-form-due-date* (string key))))))))
 
+(defun handle-detail-key (key)
+  "Handle key when detail pane is focused for editing."
+  (cond
+    ;; Escape - cancel and return to list (always active)
+    ((or (eql key #\Escape) (eql key :escape))
+     (cancel-detail-edit))
+
+    ;; Tab - next field (always active)
+    ((eql key #\Tab)
+     (move-selection 1))
+
+    ;; Enter - on notes field (1) inserts newline, otherwise saves
+    ((or (eql key #\Return) (eql key #\Newline) (eql key :enter))
+     (if (= *task-form-field* 1)
+         (setf *task-form-notes* (concatenate 'string *task-form-notes* (string #\Newline)))
+         (save-detail-edit)))
+
+    ;; Backspace - delete char on text fields (0, 1, 2)
+    ((or (eql key #\Backspace) (eql key #\Rubout) (eql key :backspace))
+     (case *task-form-field*
+       (0 (when (> (length *task-form-title*) 0)
+            (setf *task-form-title* (subseq *task-form-title* 0 (1- (length *task-form-title*))))))
+       (1 (when (> (length *task-form-notes*) 0)
+            (setf *task-form-notes* (subseq *task-form-notes* 0 (1- (length *task-form-notes*))))))
+       (2 (when (> (length *task-form-due-date*) 0)
+            (setf *task-form-due-date* (subseq *task-form-due-date* 0 (1- (length *task-form-due-date*))))))))
+
+    ;; Text fields (0, 1, 2): all printable characters as input
+    ((and (<= *task-form-field* 2)
+          (characterp key)
+          (graphic-char-p key))
+     (case *task-form-field*
+       (0 (setf *task-form-title* (concatenate 'string *task-form-title* (string key))))
+       (1 (setf *task-form-notes* (concatenate 'string (or *task-form-notes* "") (string key))))
+       (2 (setf *task-form-due-date* (concatenate 'string *task-form-due-date* (string key))))))
+
+    ;; Select fields (3-7): navigation and cycling
+    ((> *task-form-field* 2)
+     (cond
+       ;; j/down - next field
+       ((or (eql key #\j) (eql key :down) (eql key :key-down))
+        (move-selection 1))
+       ;; k/up - previous field
+       ((or (eql key #\k) (eql key :up) (eql key :key-up))
+        (move-selection -1))
+       ;; Space/h/l - cycle value
+       ((or (eql key #\Space)
+            (eql key #\h) (eql key #\l)
+            (eql key :left) (eql key :right)
+            (eql key :key-left) (eql key :key-right))
+        (task-form-cycle-value))))))
+
 (defun handle-event (event)
   "Handle keyboard input."
   (when event
@@ -483,6 +628,8 @@
          (handle-task-form-key key))
         (*input-mode*
          (handle-input-key key))
+        ((eq *focus* :detail)
+         (handle-detail-key key))
         (t
          (handle-normal-key key))))))
 
@@ -500,7 +647,22 @@
     (let ((content-x (+ *sidebar-width* 1))
           (content-width (- width *sidebar-width* 1))
           (content-height (- height 1)))
-      (render-current-view win content-x 0 content-width content-height *config*))
+
+      ;; For task views, split into list and detail panels
+      (if (task-view-p *current-view*)
+          (let* ((list-width (floor content-width 2))
+                 (detail-x (+ content-x list-width 1))
+                 (detail-width (- content-width list-width 1)))
+            ;; Draw task list on left
+            (render-current-view win content-x 0 list-width content-height *config*)
+            ;; Draw vertical separator
+            (loop for r from 0 below content-height do
+                  (move win r (+ content-x list-width))
+                  (princ #\| win))
+            ;; Draw task detail on right
+            (draw-task-detail win detail-x 0 detail-width content-height (get-selected-task)))
+          ;; Other views take full width
+          (render-current-view win content-x 0 content-width content-height *config*)))
 
     ;; Status bar
     (draw-status-bar win (- height 1) width)

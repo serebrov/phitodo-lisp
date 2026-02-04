@@ -37,14 +37,25 @@
     (local-time:parse-timestring str)))
 
 (defun date-to-string (ts)
-  "Convert local-time timestamp to date string (YYYY-MM-DD)."
+  "Convert local-time timestamp to date string (YYYY-MM-DD) in UTC."
   (when ts
-    (local-time:format-timestring nil ts :format '(:year #\- (:month 2) #\- (:day 2)))))
+    (local-time:format-timestring nil ts
+                                  :format '(:year #\- (:month 2) #\- (:day 2))
+                                  :timezone local-time:+utc-zone+)))
 
 (defun string-to-date (str)
-  "Convert date string to local-time timestamp."
+  "Convert date string to local-time timestamp at midnight UTC."
   (when (and str (not (string= str "")))
-    (local-time:parse-timestring str :date-separator #\-)))
+    (handler-case
+        (let ((parts (uiop:split-string str :separator '(#\-))))
+          (when (= (length parts) 3)
+            (local-time:encode-timestamp
+             0 0 0 0  ; nsec sec min hour
+             (parse-integer (third parts))   ; day
+             (parse-integer (second parts))  ; month
+             (parse-integer (first parts))   ; year
+             :timezone local-time:+utc-zone+)))
+      (error () nil))))
 
 ;;; Task Operations
 
