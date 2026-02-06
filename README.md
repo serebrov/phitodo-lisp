@@ -1,3 +1,18 @@
+# Experiment
+
+This is a part Claude Code experiment, proting the https://github.com/pichichi91/phitodo into different languages:
+* https://github.com/serebrov/phitodo-rust - rust
+* https://github.com/serebrov/phitodo-lisp - common lisp
+* https://github.com/serebrov/phitodo-go - go
+* https://github.com/serebrov/phitodo-python - python
+* https://github.com/serebrov/phitodo-ocaml - ocaml
+* https://github.com/serebrov/phitodo-zig - zig
+
+Overall, it worked the best for Rust, the app was built relatively quickly and without much of issues.
+Go and python are fine (had some issues, but mostly worked).
+Lisp had some problems, but fixed more or less easily.
+Zig and Ocaml were the hardest (lots of issues, not working properly even after rounds of fixes).
+
 # phitodo-tui-lisp
 
 A terminal UI clone of phitodo task management, built with Common Lisp (SBCL) using croatoan (ncurses).
